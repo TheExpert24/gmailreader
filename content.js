@@ -5,27 +5,17 @@ const LEGACY_BADGE_TEXT = /^(✔|○)\s*(Read|Not Read)$/i;
 const statusCache = {};
 
 function getEmailId(row) {
-    const legacyMessageId = row.getAttribute("data-legacy-message-id");
-    if (legacyMessageId) {
-        return `msg::${legacyMessageId}`;
-    }
-
-    const legacyThreadId = row.getAttribute("data-legacy-thread-id");
-    if (legacyThreadId) {
-        return `thread::${legacyThreadId}`;
-    }
-
     const subject = row.querySelector("span.bog")?.textContent?.trim();
-    const recipient = row.querySelector(".yW span")?.textContent?.trim();
-    const sentAt = row.querySelector("td.xW span")?.getAttribute("title")
-        || row.querySelector("td.xW span")?.textContent?.trim();
+    const sender = row.querySelector(".yW span")?.textContent?.trim();
 
     if (!subject) return null;
 
-    return `${recipient || "unknown"}::${subject}::${sentAt || "unknown-time"}`;
+    return `${sender || "unknown"}::${subject}`;
 }
 
 async function checkStatus(id) {
+    if (!id) return false;
+
     if (statusCache[id] !== undefined) return statusCache[id];
 
     try {
@@ -34,7 +24,7 @@ async function checkStatus(id) {
         statusCache[id] = !!data.opened;
         return statusCache[id];
     } catch {
-        return null;
+        return false;
     }
 }
 
@@ -42,10 +32,10 @@ function createBadge(isSeen) {
     const badge = document.createElement("span");
     badge.className = BADGE_CLASS;
 
-    badge.style.marginLeft = "8px";
-    badge.style.display = "inline-flex";
-    badge.style.alignItems = "center";
-    badge.style.gap = "4px";
+    badge.style.marginLeft = "6px";
+    badge.style.display = "inline-block";
+    badge.style.verticalAlign = "middle";
+    badge.style.whiteSpace = "nowrap";
     badge.style.fontSize = "12px";
 
     badge.innerHTML = isSeen
@@ -72,52 +62,71 @@ async function updateInbox() {
     const rows = document.querySelectorAll("tr.zA");
 
     for (const row of rows) {
+        if (row.dataset.badgeAdded) continue;
+
         const id = getEmailId(row);
         if (!id) continue;
 
-        const trackedState = await checkStatus(id);
-        const isSeen = !!trackedState;
+        const subjectEl = row.querySelector("span.bog");
+        if (!subjectEl) continue;
+
+        const isSeen = await checkStatus(id);
 
         const container = row.querySelector("td.xY");
         if (!container) continue;
 
-        removeLegacyBadges(container);
+        container.appendChild(createBadge(isSeen));
 
-        const existingBadges = container.querySelectorAll(`.${BADGE_CLASS}`);
-        if (existingBadges.length > 1) {
-            for (let i = 1; i < existingBadges.length; i += 1) {
-                existingBadges[i].remove();
-            }
-        }
-
-        const badge = existingBadges[0] || createBadge(isSeen);
-        if (!existingBadges[0]) {
-            container.appendChild(badge);
-        }
-
-        badge.innerHTML = isSeen
-            ? `✔ <span style="color:#22c55e;">Read</span>`
-            : `○ <span style="color:#9ca3af;">Not Read</span>`;
+        row.dataset.badgeAdded = "true";
     }
 }
 
-let scheduled = false;
+function injectPixel() {
+    const body = document.querySelector('[aria-label="Message Body"]');
+    if (!body || body.dataset.tracked) return;
 
-function schedule() {
-    if (scheduled) return;
-    scheduled = true;
+    const subject = document.querySelector("h2")?.innerText?.trim();
+    if (!subject) return;
 
-    setTimeout(() => {
-        updateInbox();
-        scheduled = false;
-    }, 800);
+    const id = subject;
+
+    const img = document.createElement("img");
+    img.src = `${SERVER_URL}/track?id=${encodeURIComponent(id)}&t=${Date.now()}`;
+    img.style.width = "1px";
+    img.style.height = "1px";
+    img.style.opacity = "0";
+
+    body.appendChild(img);
+    body.dataset.tracked = "true";
+
+    statusCache[id] = true;
 }
 
-const observer = new MutationObserver(schedule);
+const observer = new MutationObserver(() => {
+    updateInbox();
+    injectPixel();
+});
 
 observer.observe(document.body, {
     childList: true,
     subtree: true
 });
+
+let lastUrl = location.href;
+
+setInterval(() => {
+    if (location.href !== lastUrl) {
+        lastUrl = location.href;
+
+        document
+            .querySelector('[aria-label="Message Body"]')
+            ?.removeAttribute("data-tracked");
+
+        injectPixel();
+    }
+}, 500);
+
+// warm up render server
+fetch(`${SERVER_URL}/status?id=warmup`).catch(() => {});
 
 updateInbox();
