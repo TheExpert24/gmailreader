@@ -1,4 +1,4 @@
-const SERVER_URL = "https://gmailreader-kr66.onrender.com";
+const SERVER_URL = "https://gmailreader1.onrender.com";
 
 const statusCache = {};
 
