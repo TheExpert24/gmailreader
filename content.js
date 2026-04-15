@@ -1,132 +1,242 @@
 const SERVER_URL = "https://gmailreader1.onrender.com";
 const BADGE_CLASS = "gmail-seen-tracker-badge";
-const LEGACY_BADGE_TEXT = /^(✔|○)\s*(Read|Not Read)$/i;
+const BADGE_STYLE_ID = "gmail-seen-tracker-style";
+const LEGACY_BADGE_TEXT = /^(?:✔|○)?\s*(?:Read|Not Read)$/i;
 
-const statusCache = {};
+if (window.__gmailSeenTrackerLoaded) {
+    // Prevent duplicate observers/badge injection if the content script is re-evaluated.
+    void 0;
+} else {
+    window.__gmailSeenTrackerLoaded = true;
 
-function getEmailId(row) {
-    const subject = row.querySelector("span.bog")?.textContent?.trim();
-    const sender = row.querySelector(".yW span")?.textContent?.trim();
+    const statusCache = Object.create(null);
+    const inflightStatus = Object.create(null);
+    const openedCache = Object.create(null);
+    let updateInProgress = false;
+    let updateQueued = false;
 
-    if (!subject) return null;
+    injectBadgeStyles();
+    setupObservers();
+    setupReadTracking();
+    queueInboxUpdate();
 
-    return `${sender || "unknown"}::${subject}`;
-}
+    function injectBadgeStyles() {
+        if (document.getElementById(BADGE_STYLE_ID)) return;
 
-async function checkStatus(id) {
-    if (!id) return false;
+        const style = document.createElement("style");
+        style.id = BADGE_STYLE_ID;
+        style.textContent = `
+            .${BADGE_CLASS} {
+                margin-left: 6px;
+                display: inline-flex;
+                align-items: center;
+                gap: 4px;
+                font-size: 12px;
+                white-space: nowrap;
+                vertical-align: middle;
+            }
+            .${BADGE_CLASS}[data-seen="true"] .label {
+                color: #22c55e;
+            }
+            .${BADGE_CLASS}[data-seen="false"] .label {
+                color: #9ca3af;
+            }
+        `;
 
-    if (statusCache[id] !== undefined) return statusCache[id];
-
-    try {
-        const res = await fetch(`${SERVER_URL}/status?id=${encodeURIComponent(id)}`);
-        const data = await res.json();
-        statusCache[id] = !!data.opened;
-        return statusCache[id];
-    } catch {
-        return false;
+        document.head.appendChild(style);
     }
-}
 
-function createBadge(isSeen) {
-    const badge = document.createElement("span");
-    badge.className = BADGE_CLASS;
+    function setupObservers() {
+        const observer = new MutationObserver(() => {
+            queueInboxUpdate();
+        });
 
-    badge.style.marginLeft = "6px";
-    badge.style.display = "inline-block";
-    badge.style.verticalAlign = "middle";
-    badge.style.whiteSpace = "nowrap";
-    badge.style.fontSize = "12px";
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
 
-    badge.innerHTML = isSeen
-        ? `✔ <span style="color:#22c55e;">Read</span>`
-        : `○ <span style="color:#9ca3af;">Not Read</span>`;
+        // Periodic refresh so status can flip to Read after backend updates.
+        setInterval(() => {
+            clearOldCacheEntries();
+            queueInboxUpdate();
+        }, 4000);
 
-    return badge;
-}
+        // Warm up the backend and ignore transient failures.
+        fetch(`${SERVER_URL}/status?id=warmup`, { cache: "no-store" }).catch(() => {});
+    }
 
-function removeLegacyBadges(container) {
-    const spans = container.querySelectorAll("span");
+    function setupReadTracking() {
+        document.addEventListener(
+            "click",
+            (event) => {
+                const target = event.target;
+                if (!(target instanceof Element)) return;
 
-    for (const span of spans) {
-        if (span.classList.contains(BADGE_CLASS)) continue;
+                const row = target.closest("tr.zA");
+                if (!row) return;
 
-        const text = span.textContent?.replace(/\s+/g, " ").trim() || "";
-        if (LEGACY_BADGE_TEXT.test(text)) {
-            span.remove();
+                const id = getEmailId(row);
+                if (!id) return;
+
+                markOpened(id);
+            },
+            true
+        );
+    }
+
+    function clearOldCacheEntries() {
+        const now = Date.now();
+        for (const key of Object.keys(statusCache)) {
+            const age = now - statusCache[key].ts;
+            if (age > 20000) {
+                delete statusCache[key];
+            }
+        }
+
+        for (const key of Object.keys(openedCache)) {
+            if (now - openedCache[key] > 60000) {
+                delete openedCache[key];
+            }
+        }
+    }
+
+    function queueInboxUpdate() {
+        if (updateInProgress) {
+            updateQueued = true;
+            return;
+        }
+
+        updateInProgress = true;
+        void updateInbox()
+            .catch(() => {})
+            .finally(() => {
+                updateInProgress = false;
+                if (updateQueued) {
+                    updateQueued = false;
+                    queueInboxUpdate();
+                }
+            });
+    }
+
+    function getEmailId(row) {
+        const legacyMessageId = row.getAttribute("data-legacy-message-id");
+        if (legacyMessageId) return `msg::${legacyMessageId}`;
+
+        const legacyThreadId = row.getAttribute("data-legacy-thread-id");
+        if (legacyThreadId) return `thread::${legacyThreadId}`;
+
+        const subject = row.querySelector("span.bog")?.textContent?.trim();
+        if (subject) return `subject::${subject}`;
+
+        return null;
+    }
+
+    function isReadInGmail(row) {
+        // Gmail uses class zE for unread rows.
+        return !row.classList.contains("zE");
+    }
+
+    async function checkStatus(id) {
+        if (!id) return false;
+
+        if (openedCache[id]) return true;
+
+        const cached = statusCache[id];
+        if (cached && Date.now() - cached.ts < 4000) {
+            return cached.opened;
+        }
+
+        if (inflightStatus[id]) {
+            return inflightStatus[id];
+        }
+
+        inflightStatus[id] = (async () => {
+            try {
+                const res = await fetch(`${SERVER_URL}/status?id=${encodeURIComponent(id)}`, {
+                    cache: "no-store"
+                });
+                const data = await res.json();
+                const opened = !!data.opened;
+                statusCache[id] = { opened, ts: Date.now() };
+                return opened;
+            } catch {
+                return false;
+            } finally {
+                delete inflightStatus[id];
+            }
+        })();
+
+        return inflightStatus[id];
+    }
+
+    function markOpened(id) {
+        if (!id || openedCache[id]) return;
+
+        openedCache[id] = Date.now();
+        statusCache[id] = { opened: true, ts: Date.now() };
+
+        const img = document.createElement("img");
+        img.width = 1;
+        img.height = 1;
+        img.style.position = "absolute";
+        img.style.left = "-9999px";
+        img.style.top = "-9999px";
+        img.src = `${SERVER_URL}/track?id=${encodeURIComponent(id)}&t=${Date.now()}`;
+        document.body.appendChild(img);
+
+        setTimeout(() => {
+            img.remove();
+            queueInboxUpdate();
+        }, 1200);
+    }
+
+    function createOrUpdateBadge(container, isSeen) {
+        const allBadges = container.querySelectorAll(`.${BADGE_CLASS}`);
+        for (let i = 1; i < allBadges.length; i += 1) {
+            allBadges[i].remove();
+        }
+
+        let badge = allBadges[0];
+        if (!badge) {
+            badge = document.createElement("span");
+            badge.className = BADGE_CLASS;
+            container.appendChild(badge);
+        }
+
+        badge.dataset.seen = String(!!isSeen);
+        badge.innerHTML = isSeen
+            ? '✔ <span class="label">Read</span>'
+            : '○ <span class="label">Not Read</span>';
+    }
+
+    function removeLegacyBadgeArtifacts(container) {
+        const spans = container.querySelectorAll("span, div");
+        for (const span of spans) {
+            if (span.classList.contains(BADGE_CLASS)) continue;
+            const text = span.textContent?.replace(/\s+/g, " ").trim() || "";
+            if (LEGACY_BADGE_TEXT.test(text)) {
+                span.remove();
+            }
+        }
+    }
+
+    async function updateInbox() {
+        const rows = document.querySelectorAll("tr.zA");
+
+        for (const row of rows) {
+            const container = row.querySelector("td.xY");
+            if (!container) continue;
+
+            removeLegacyBadgeArtifacts(container);
+
+            const id = getEmailId(row);
+            const trackedSeen = id ? await checkStatus(id) : false;
+            const gmailSeen = isReadInGmail(row);
+
+            // If user has read it in Gmail, always show Read.
+            const isSeen = gmailSeen || trackedSeen;
+            createOrUpdateBadge(container, isSeen);
         }
     }
 }
-
-async function updateInbox() {
-    const rows = document.querySelectorAll("tr.zA");
-
-    for (const row of rows) {
-        if (row.dataset.badgeAdded) continue;
-
-        const id = getEmailId(row);
-        if (!id) continue;
-
-        const subjectEl = row.querySelector("span.bog");
-        if (!subjectEl) continue;
-
-        const isSeen = await checkStatus(id);
-
-        const container = row.querySelector("td.xY");
-        if (!container) continue;
-
-        container.appendChild(createBadge(isSeen));
-
-        row.dataset.badgeAdded = "true";
-    }
-}
-
-function injectPixel() {
-    const body = document.querySelector('[aria-label="Message Body"]');
-    if (!body || body.dataset.tracked) return;
-
-    const subject = document.querySelector("h2")?.innerText?.trim();
-    if (!subject) return;
-
-    const id = subject;
-
-    const img = document.createElement("img");
-    img.src = `${SERVER_URL}/track?id=${encodeURIComponent(id)}&t=${Date.now()}`;
-    img.style.width = "1px";
-    img.style.height = "1px";
-    img.style.opacity = "0";
-
-    body.appendChild(img);
-    body.dataset.tracked = "true";
-
-    statusCache[id] = true;
-}
-
-const observer = new MutationObserver(() => {
-    updateInbox();
-    injectPixel();
-});
-
-observer.observe(document.body, {
-    childList: true,
-    subtree: true
-});
-
-let lastUrl = location.href;
-
-setInterval(() => {
-    if (location.href !== lastUrl) {
-        lastUrl = location.href;
-
-        document
-            .querySelector('[aria-label="Message Body"]')
-            ?.removeAttribute("data-tracked");
-
-        injectPixel();
-    }
-}, 500);
-
-// warm up render server
-fetch(`${SERVER_URL}/status?id=warmup`).catch(() => {});
-
-updateInbox();
