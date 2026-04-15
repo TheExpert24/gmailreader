@@ -165,6 +165,16 @@ if (window.__gmailSeenTrackerLoaded) {
         return row.querySelector("td.yX.xY") || row.querySelector("td.xY");
     }
 
+    function isSentStyleRow(row) {
+        const nameText = row.querySelector(".yW span")?.textContent?.trim() || "";
+        return /^to:\s*/i.test(nameText);
+    }
+
+    function isReadInGmail(row) {
+        // Gmail marks unread rows with zE.
+        return !row.classList.contains("zE");
+    }
+
     function createOrUpdateBadge(row, anchor, isSeen) {
         const allRowBadges = row.querySelectorAll(`.${BADGE_CLASS}`);
         for (let i = 1; i < allRowBadges.length; i += 1) {
@@ -216,8 +226,13 @@ if (window.__gmailSeenTrackerLoaded) {
             const anchor = getBadgeAnchor(row);
             if (!anchor) continue;
 
-            // Recipient tracking status only.
-            createOrUpdateBadge(row, anchor, trackedSeen);
+            // For sent-style rows ("To:"), show recipient-open tracking.
+            // For inbox-style rows, show Gmail read state for your local mailbox.
+            const seen = isSentStyleRow(row)
+                ? trackedSeen
+                : (isReadInGmail(row) || trackedSeen);
+
+            createOrUpdateBadge(row, anchor, seen);
         }
     }
 }
