@@ -4,14 +4,12 @@ const statusCache = {};
 
 function getEmailIdFromRow(row) {
     const subject = row.querySelector("span.bog")?.textContent?.trim();
-    const sender = row.querySelector(".yW span")?.textContent?.trim();
-
-    if (!subject) return null;
-
-    return `${sender || "unknown"}::${subject}`;
+    return subject || null;
 }
 
 async function checkStatus(id) {
+    if (!id) return false;
+
     if (statusCache[id] !== undefined) return statusCache[id];
 
     try {
@@ -20,7 +18,15 @@ async function checkStatus(id) {
         statusCache[id] = !!data.opened;
         return statusCache[id];
     } catch {
-        return false;
+        await new Promise(r => setTimeout(r, 1000));
+        try {
+            const res = await fetch(`${SERVER_URL}/status?id=${encodeURIComponent(id)}`);
+            const data = await res.json();
+            statusCache[id] = !!data.opened;
+            return statusCache[id];
+        } catch {
+            return false;
+        }
     }
 }
 
@@ -49,11 +55,10 @@ async function updateInbox() {
         const id = getEmailIdFromRow(row);
         if (!id) continue;
 
-        const isSeen = await checkStatus(id);
-
         const subjectEl = row.querySelector("span.bog");
         if (!subjectEl) continue;
 
+        const isSeen = await checkStatus(id);
         subjectEl.appendChild(createBadge(isSeen));
 
         row.dataset.badgeAdded = "true";
@@ -65,15 +70,15 @@ function injectPixel() {
     if (!body || body.dataset.tracked) return;
 
     const subject = document.querySelector("h2")?.innerText?.trim();
-    const sender = document.querySelector(".gD")?.innerText?.trim();
-
     if (!subject) return;
 
-    const id = `${sender || "unknown"}::${subject}`;
+    const id = subject;
 
     const img = document.createElement("img");
-    img.src = `${SERVER_URL}/track?id=${encodeURIComponent(id)}`;
-    img.style.display = "none";
+    img.src = `${SERVER_URL}/track?id=${encodeURIComponent(id)}&t=${Date.now()}`;
+    img.style.width = "1px";
+    img.style.height = "1px";
+    img.style.opacity = "0";
 
     body.appendChild(img);
     body.dataset.tracked = "true";
@@ -81,20 +86,8 @@ function injectPixel() {
     statusCache[id] = true;
 }
 
-let scheduled = false;
-
-function schedule() {
-    if (scheduled) return;
-    scheduled = true;
-
-    setTimeout(() => {
-        updateInbox();
-        scheduled = false;
-    }, 800);
-}
-
 const observer = new MutationObserver(() => {
-    schedule();
+    updateInbox();
     injectPixel();
 });
 
@@ -116,5 +109,8 @@ setInterval(() => {
         injectPixel();
     }
 }, 500);
+
+// warm up render server
+fetch(`${SERVER_URL}/status?id=warmup`).catch(() => {});
 
 updateInbox();
