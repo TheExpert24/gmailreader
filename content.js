@@ -11,13 +11,11 @@ if (window.__gmailSeenTrackerLoaded) {
 
     const statusCache = Object.create(null);
     const inflightStatus = Object.create(null);
-    const openedCache = Object.create(null);
     let updateInProgress = false;
     let updateQueued = false;
 
     injectBadgeStyles();
     setupObservers();
-    setupReadTracking();
     queueInboxUpdate();
 
     function injectBadgeStyles() {
@@ -34,6 +32,7 @@ if (window.__gmailSeenTrackerLoaded) {
                 font-size: 12px;
                 white-space: nowrap;
                 vertical-align: middle;
+                font-weight: 500;
             }
             .${BADGE_CLASS}[data-seen="true"] .label {
                 color: #22c55e;
@@ -66,37 +65,12 @@ if (window.__gmailSeenTrackerLoaded) {
         fetch(`${SERVER_URL}/status?id=warmup`, { cache: "no-store" }).catch(() => {});
     }
 
-    function setupReadTracking() {
-        document.addEventListener(
-            "click",
-            (event) => {
-                const target = event.target;
-                if (!(target instanceof Element)) return;
-
-                const row = target.closest("tr.zA");
-                if (!row) return;
-
-                const id = getEmailId(row);
-                if (!id) return;
-
-                markOpened(id);
-            },
-            true
-        );
-    }
-
     function clearOldCacheEntries() {
         const now = Date.now();
         for (const key of Object.keys(statusCache)) {
             const age = now - statusCache[key].ts;
             if (age > 20000) {
                 delete statusCache[key];
-            }
-        }
-
-        for (const key of Object.keys(openedCache)) {
-            if (now - openedCache[key] > 60000) {
-                delete openedCache[key];
             }
         }
     }
@@ -119,28 +93,29 @@ if (window.__gmailSeenTrackerLoaded) {
             });
     }
 
-    function getEmailId(row) {
+    function getEmailIds(row) {
+        const ids = [];
         const legacyMessageId = row.getAttribute("data-legacy-message-id");
-        if (legacyMessageId) return `msg::${legacyMessageId}`;
+        if (legacyMessageId) ids.push(`msg::${legacyMessageId}`);
 
         const legacyThreadId = row.getAttribute("data-legacy-thread-id");
-        if (legacyThreadId) return `thread::${legacyThreadId}`;
+        if (legacyThreadId) ids.push(`thread::${legacyThreadId}`);
 
         const subject = row.querySelector("span.bog")?.textContent?.trim();
-        if (subject) return `subject::${subject}`;
+        const person = row.querySelector(".yW span")?.textContent?.trim();
+        const sentAt = row.querySelector("td.xW span")?.getAttribute("title")
+            || row.querySelector("td.xW span")?.textContent?.trim();
 
-        return null;
-    }
+        if (subject && person) ids.push(`${person}::${subject}`);
+        if (subject && person && sentAt) ids.push(`${person}::${subject}::${sentAt}`);
+        if (subject) ids.push(`subject::${subject}`);
+        if (subject) ids.push(subject);
 
-    function isReadInGmail(row) {
-        // Gmail uses class zE for unread rows.
-        return !row.classList.contains("zE");
+        return [...new Set(ids)];
     }
 
     async function checkStatus(id) {
         if (!id) return false;
-
-        if (openedCache[id]) return true;
 
         const cached = statusCache[id];
         if (cached && Date.now() - cached.ts < 4000) {
@@ -170,38 +145,44 @@ if (window.__gmailSeenTrackerLoaded) {
         return inflightStatus[id];
     }
 
-    function markOpened(id) {
-        if (!id || openedCache[id]) return;
-
-        openedCache[id] = Date.now();
-        statusCache[id] = { opened: true, ts: Date.now() };
-
-        const img = document.createElement("img");
-        img.width = 1;
-        img.height = 1;
-        img.style.position = "absolute";
-        img.style.left = "-9999px";
-        img.style.top = "-9999px";
-        img.src = `${SERVER_URL}/track?id=${encodeURIComponent(id)}&t=${Date.now()}`;
-        document.body.appendChild(img);
-
-        setTimeout(() => {
-            img.remove();
-            queueInboxUpdate();
-        }, 1200);
-    }
-
-    function createOrUpdateBadge(container, isSeen) {
-        const allBadges = container.querySelectorAll(`.${BADGE_CLASS}`);
-        for (let i = 1; i < allBadges.length; i += 1) {
-            allBadges[i].remove();
+    async function checkStatusFromAnyId(ids) {
+        for (const id of ids) {
+            const opened = await checkStatus(id);
+            if (opened) return true;
         }
 
-        let badge = allBadges[0];
+        return false;
+    }
+
+    function getBadgeAnchor(row) {
+        const rightName = row.querySelector("td.yX.xY .yW span")
+            || row.querySelector("td.yX.xY span.yP")
+            || row.querySelector(".yW span")
+            || row.querySelector("span.yP");
+
+        if (rightName) return rightName;
+
+        return row.querySelector("td.yX.xY") || row.querySelector("td.xY");
+    }
+
+    function createOrUpdateBadge(row, anchor, isSeen) {
+        const allRowBadges = row.querySelectorAll(`.${BADGE_CLASS}`);
+        for (let i = 1; i < allRowBadges.length; i += 1) {
+            allRowBadges[i].remove();
+        }
+
+        let badge = allRowBadges[0];
         if (!badge) {
             badge = document.createElement("span");
             badge.className = BADGE_CLASS;
-            container.appendChild(badge);
+        }
+
+        if (anchor instanceof HTMLTableCellElement || anchor instanceof HTMLDivElement) {
+            if (badge.parentElement !== anchor) {
+                anchor.appendChild(badge);
+            }
+        } else {
+            anchor.insertAdjacentElement("afterend", badge);
         }
 
         badge.dataset.seen = String(!!isSeen);
@@ -225,18 +206,18 @@ if (window.__gmailSeenTrackerLoaded) {
         const rows = document.querySelectorAll("tr.zA");
 
         for (const row of rows) {
-            const container = row.querySelector("td.xY");
-            if (!container) continue;
+            const legacyContainer = row.querySelector("td.xY");
+            if (legacyContainer) {
+                removeLegacyBadgeArtifacts(legacyContainer);
+            }
 
-            removeLegacyBadgeArtifacts(container);
+            const ids = getEmailIds(row);
+            const trackedSeen = ids.length ? await checkStatusFromAnyId(ids) : false;
+            const anchor = getBadgeAnchor(row);
+            if (!anchor) continue;
 
-            const id = getEmailId(row);
-            const trackedSeen = id ? await checkStatus(id) : false;
-            const gmailSeen = isReadInGmail(row);
-
-            // If user has read it in Gmail, always show Read.
-            const isSeen = gmailSeen || trackedSeen;
-            createOrUpdateBadge(container, isSeen);
+            // Recipient tracking status only.
+            createOrUpdateBadge(row, anchor, trackedSeen);
         }
     }
 }
