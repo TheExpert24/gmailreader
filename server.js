@@ -4,7 +4,6 @@ const cors = require("cors");
 const app = express();
 app.use(cors());
 
-// In-memory DB (OK for dev; upgrade later if needed)
 const db = {};
 
 app.get("/track", (req, res) => {
@@ -29,8 +28,6 @@ app.get("/track", (req, res) => {
         db[id].firstOpened = Date.now();
     }
 
-    console.log("Opened:", id);
-
     const pixel = Buffer.from(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=",
         "base64"
@@ -43,14 +40,10 @@ app.get("/track", (req, res) => {
 app.get("/status", (req, res) => {
     const id = req.query.id;
 
-    if (!id) {
-        return res.json({ opened: false });
-    }
+    if (!id) return res.json({ opened: false });
 
     res.json(db[id] || { opened: false });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log("Server running on port", PORT);
-});
+app.listen(PORT, () => console.log("Server running on port", PORT));
