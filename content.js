@@ -1,15 +1,26 @@
 const SERVER_URL = "https://gmailreader1.onrender.com";
+function getEmailIdFromRow(row) {
+    return (
+        row.getAttribute("data-thread-id") ||
+        row.getAttribute("data-legacy-thread-id") ||
+        row.querySelector("span.bog")?.innerText ||
+        null
+    );
+}
 
-let currentEmailId = null;
-function injectPixel() {
+let lastUrl = location.href;
+
+function injectPixelIfNeeded() {
     const body = document.querySelector('[aria-label="Message Body"]');
 
-    if (!body || body.dataset.tracked) return;
+    if (!body) return;
 
-    currentEmailId = "email_" + Date.now();
+    if (body.dataset.tracked === "true") return;
+
+    const emailId = "email_" + Date.now(); // fallback unique id per open
 
     const img = document.createElement("img");
-    img.src = `${SERVER_URL}/track?id=${currentEmailId}`;
+    img.src = `${SERVER_URL}/track?id=${emailId}`;
     img.style.width = "1px";
     img.style.height = "1px";
     img.style.display = "none";
@@ -17,30 +28,33 @@ function injectPixel() {
     body.appendChild(img);
     body.dataset.tracked = "true";
 
-    chrome.storage.local.set({ currentEmailId });
+    chrome.storage.local.set({ currentEmailId: emailId });
 
-    console.log("Tracking ID:", currentEmailId);
+    console.log("Tracked open:", emailId);
 }
+
 async function checkStatus(id) {
     try {
         const res = await fetch(`${SERVER_URL}/status?id=${id}`);
         const data = await res.json();
         return data.opened;
-    } catch (e) {
+    } catch {
         return false;
     }
 }
 
 function createBadge(isSeen) {
     const badge = document.createElement("span");
+    badge.className = "gmail-read-badge";
+
     badge.style.marginLeft = "8px";
     badge.style.display = "inline-flex";
     badge.style.alignItems = "center";
     badge.style.gap = "4px";
     badge.style.fontSize = "12px";
 
-    if (isSeen) {
-        badge.innerHTML = `
+    badge.innerHTML = isSeen
+        ? `
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
                 <path d="M20 6L9 17l-5-5"
                       stroke="#22c55e"
@@ -48,18 +62,16 @@ function createBadge(isSeen) {
                       stroke-linecap="round"
                       stroke-linejoin="round"/>
             </svg>
-            <span style="color:#22c55e;">Seen</span>
-        `;
-    } else {
-        badge.innerHTML = `
+            <span style="color:#22c55e;">Read</span>
+        `
+        : `
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
                 <circle cx="12" cy="12" r="9"
                         stroke="#9ca3af"
                         stroke-width="2"/>
             </svg>
-            <span style="color:#9ca3af;">Not seen</span>
+            <span style="color:#9ca3af;">Not Read</span>
         `;
-    }
 
     return badge;
 }
@@ -67,27 +79,51 @@ function createBadge(isSeen) {
 async function updateInbox() {
     const rows = document.querySelectorAll("tr.zA");
 
-    const stored = await chrome.storage.local.get("currentEmailId");
-    const id = stored.currentEmailId;
+    for (const row of rows) {
+        if (row.dataset.badgeAdded === "true") continue;
 
-    if (!id) return;
+        const id = getEmailIdFromRow(row);
+        if (!id) continue;
 
-    const isSeen = await checkStatus(id);
-
-    rows.forEach((row) => {
-        if (row.dataset.badgeAdded) return;
+        const isSeen = await checkStatus(id);
 
         const title = row.querySelector("span.bog");
+        if (!title) continue;
 
-        if (title) {
-            const badge = createBadge(isSeen);
-            title.appendChild(badge);
-        }
+        const badge = createBadge(isSeen);
+
+        // attach safely to row (Gmail doesn't wipe this as often)
+        const container = row.querySelector("td.xY") || title;
+
+        container.appendChild(badge);
 
         row.dataset.badgeAdded = "true";
-    });
+    }
 }
-setInterval(() => {
-    injectPixel();
-    updateInbox();
-}, 3000);
+
+function watchGmail() {
+    const observer = new MutationObserver(() => {
+        updateInbox();
+        injectPixelIfNeeded();
+    });
+
+    observer.observe(document.body, {
+        childList: true,
+        subtree: true
+    });
+
+    // URL watcher (Gmail navigation)
+    setInterval(() => {
+        if (location.href !== lastUrl) {
+            lastUrl = location.href;
+
+            // reset tracking for new email view
+            document.querySelector('[aria-label="Message Body"]')?.removeAttribute("data-tracked");
+
+            injectPixelIfNeeded();
+        }
+    }, 500);
+}
+
+watchGmail();
+updateInbox();
