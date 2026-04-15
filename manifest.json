@@ -5,7 +5,8 @@
   "permissions": ["storage", "scripting"],
   "host_permissions": [
     "https://mail.google.com/*",
-    "http://localhost:3000/*"
+    "http://localhost:3000/*",
+    "https://gmailreader1.onrender.com/*"
   ],
   "content_scripts": [
     {
