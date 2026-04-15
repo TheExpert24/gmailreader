@@ -8,7 +8,6 @@ const db = {};
 
 app.get("/track", (req, res) => {
     const id = req.query.id;
-
     if (!id) return res.sendStatus(400);
 
     if (!db[id]) {
@@ -34,12 +33,12 @@ app.get("/track", (req, res) => {
     );
 
     res.setHeader("Content-Type", "image/png");
+    res.setHeader("Cache-Control", "no-store");
     res.send(pixel);
 });
 
 app.get("/status", (req, res) => {
     const id = req.query.id;
-
     if (!id) return res.json({ opened: false });
 
     res.json(db[id] || { opened: false });
