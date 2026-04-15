@@ -11,6 +11,7 @@ if (window.__gmailSeenTrackerLoaded) {
 
     const statusCache = Object.create(null);
     const inflightStatus = Object.create(null);
+    const reportedOpenIds = Object.create(null);
     let updateInProgress = false;
     let updateQueued = false;
 
@@ -71,6 +72,12 @@ if (window.__gmailSeenTrackerLoaded) {
             const age = now - statusCache[key].ts;
             if (age > 20000) {
                 delete statusCache[key];
+            }
+        }
+
+        for (const key of Object.keys(reportedOpenIds)) {
+            if (now - reportedOpenIds[key] > 300000) {
+                delete reportedOpenIds[key];
             }
         }
     }
@@ -165,6 +172,26 @@ if (window.__gmailSeenTrackerLoaded) {
         return row.querySelector("td.yX.xY") || row.querySelector("td.xY");
     }
 
+    function reportOpenForIds(ids) {
+        for (const id of ids) {
+            if (!id || reportedOpenIds[id]) continue;
+
+            reportedOpenIds[id] = Date.now();
+            statusCache[id] = { opened: true, ts: Date.now() };
+
+            const pixel = document.createElement("img");
+            pixel.width = 1;
+            pixel.height = 1;
+            pixel.style.position = "absolute";
+            pixel.style.left = "-9999px";
+            pixel.style.top = "-9999px";
+            pixel.src = `${SERVER_URL}/track?id=${encodeURIComponent(id)}&t=${Date.now()}`;
+            document.body.appendChild(pixel);
+
+            setTimeout(() => pixel.remove(), 2000);
+        }
+    }
+
     function isSentStyleRow(row) {
         const nameText = row.querySelector(".yW span")?.textContent?.trim() || "";
         return /^to:\s*/i.test(nameText);
@@ -228,9 +255,16 @@ if (window.__gmailSeenTrackerLoaded) {
 
             // For sent-style rows ("To:"), show recipient-open tracking.
             // For inbox-style rows, show Gmail read state for your local mailbox.
-            const seen = isSentStyleRow(row)
+            const sentStyle = isSentStyleRow(row);
+            const gmailRead = isReadInGmail(row);
+
+            if (!sentStyle && gmailRead && ids.length) {
+                reportOpenForIds(ids);
+            }
+
+            const seen = sentStyle
                 ? trackedSeen
-                : (isReadInGmail(row) || trackedSeen);
+                : (gmailRead || trackedSeen);
 
             createOrUpdateBadge(row, anchor, seen);
         }
