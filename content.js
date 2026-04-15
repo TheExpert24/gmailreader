@@ -1,8 +1,8 @@
-const SERVER_URL = "https://gmailreader1.onrender.com";
+const SERVER_URL = "https://gmailreader-kr66.onrender.com";
 
 const statusCache = {};
 
-function getEmailId(row) {
+function getEmailIdFromRow(row) {
     const subject = row.querySelector("span.bog")?.textContent?.trim();
     const sender = row.querySelector(".yW span")?.textContent?.trim();
 
@@ -27,10 +27,10 @@ async function checkStatus(id) {
 function createBadge(isSeen) {
     const badge = document.createElement("span");
 
-    badge.style.marginLeft = "8px";
-    badge.style.display = "inline-flex";
-    badge.style.alignItems = "center";
-    badge.style.gap = "4px";
+    badge.style.marginLeft = "6px";
+    badge.style.display = "inline-block";
+    badge.style.verticalAlign = "middle";
+    badge.style.whiteSpace = "nowrap";
     badge.style.fontSize = "12px";
 
     badge.innerHTML = isSeen
@@ -46,18 +46,39 @@ async function updateInbox() {
     for (const row of rows) {
         if (row.dataset.badgeAdded) continue;
 
-        const id = getEmailId(row);
+        const id = getEmailIdFromRow(row);
         if (!id) continue;
 
         const isSeen = await checkStatus(id);
 
-        const container = row.querySelector("td.xY");
-        if (!container) continue;
+        const subjectEl = row.querySelector("span.bog");
+        if (!subjectEl) continue;
 
-        container.appendChild(createBadge(isSeen));
+        subjectEl.appendChild(createBadge(isSeen));
 
         row.dataset.badgeAdded = "true";
     }
+}
+
+function injectPixel() {
+    const body = document.querySelector('[aria-label="Message Body"]');
+    if (!body || body.dataset.tracked) return;
+
+    const subject = document.querySelector("h2")?.innerText?.trim();
+    const sender = document.querySelector(".gD")?.innerText?.trim();
+
+    if (!subject) return;
+
+    const id = `${sender || "unknown"}::${subject}`;
+
+    const img = document.createElement("img");
+    img.src = `${SERVER_URL}/track?id=${encodeURIComponent(id)}`;
+    img.style.display = "none";
+
+    body.appendChild(img);
+    body.dataset.tracked = "true";
+
+    statusCache[id] = true;
 }
 
 let scheduled = false;
@@ -72,11 +93,28 @@ function schedule() {
     }, 800);
 }
 
-const observer = new MutationObserver(schedule);
+const observer = new MutationObserver(() => {
+    schedule();
+    injectPixel();
+});
 
 observer.observe(document.body, {
     childList: true,
     subtree: true
 });
+
+let lastUrl = location.href;
+
+setInterval(() => {
+    if (location.href !== lastUrl) {
+        lastUrl = location.href;
+
+        document
+            .querySelector('[aria-label="Message Body"]')
+            ?.removeAttribute("data-tracked");
+
+        injectPixel();
+    }
+}, 500);
 
 updateInbox();
