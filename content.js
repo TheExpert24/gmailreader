@@ -105,8 +105,22 @@ if (!window.__gmailSeenTrackerLoaded) {
         return `${cleanToLabel(recipient)}::${normalizeText(subject)}`;
     }
 
+    function getParticipantCellText(row) {
+        return row.querySelector("td.yX.xY")?.innerText
+            || row.querySelector("td.yX")?.innerText
+            || row.querySelector("td.xY")?.innerText
+            || "";
+    }
+
     function getRowRecipient(row) {
-        return row.querySelector(".yW span")?.textContent?.trim() || "";
+        const direct = row.querySelector(".yW span")?.textContent?.trim();
+        if (direct) return direct;
+
+        const participantText = getParticipantCellText(row).replace(/\s+/g, " ").trim();
+        const toMatch = participantText.match(/To:\s*([^\-\n]+)/i);
+        if (toMatch?.[1]) return toMatch[1].trim();
+
+        return participantText;
     }
 
     function getRowSubject(row) {
@@ -115,14 +129,19 @@ if (!window.__gmailSeenTrackerLoaded) {
 
     function isSentStyleRow(row) {
         const recipient = getRowRecipient(row);
-        return /^to:\s*/i.test(recipient);
+        const participantText = getParticipantCellText(row).replace(/\s+/g, " ").trim();
+
+        return /^to:\s*/i.test(recipient) || /\bto:\s*/i.test(participantText);
     }
 
     function getBadgeAnchor(row) {
         return row.querySelector("td.yX.xY .yW span")
             || row.querySelector("td.yX.xY span.yP")
             || row.querySelector(".yW span")
+            || row.querySelector("td.yX .yW span")
+            || row.querySelector("td.yX span.yP")
             || row.querySelector("td.yX.xY")
+            || row.querySelector("td.yX")
             || row.querySelector("td.xY");
     }
 
@@ -199,10 +218,12 @@ if (!window.__gmailSeenTrackerLoaded) {
     }
 
     async function updateInbox() {
-        const rows = document.querySelectorAll("tr.zA");
+        const rows = document.querySelectorAll("tr.zA, tr[role='row']");
         const renderedIndexes = Object.create(null);
 
         for (const row of rows) {
+            if (!row.querySelector("span.bog")) continue;
+
             const anchor = getBadgeAnchor(row);
             if (!anchor) continue;
 
