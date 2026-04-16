@@ -5,10 +5,23 @@ const app = express();
 app.use(cors());
 
 const db = {};
+const ARMED_AT = {};
+const ARM_MIN_DELAY_MS = 8000;
+
+app.get("/arm", (req, res) => {
+    const id = req.query.id;
+    if (!id) return res.sendStatus(400);
+
+    ARMED_AT[id] = Date.now();
+    res.json({ ok: true, armedAt: ARMED_AT[id] });
+});
 
 app.get("/track", (req, res) => {
     const id = req.query.id;
     if (!id) return res.sendStatus(400);
+
+    const armedAt = ARMED_AT[id] || 0;
+    const shouldCountOpen = armedAt > 0 && Date.now() - armedAt >= ARM_MIN_DELAY_MS;
 
     if (!db[id]) {
         db[id] = {
@@ -19,12 +32,14 @@ app.get("/track", (req, res) => {
         };
     }
 
-    db[id].opened = true;
-    db[id].count += 1;
-    db[id].lastOpened = Date.now();
+    if (shouldCountOpen) {
+        db[id].opened = true;
+        db[id].count += 1;
+        db[id].lastOpened = Date.now();
 
-    if (!db[id].firstOpened) {
-        db[id].firstOpened = Date.now();
+        if (!db[id].firstOpened) {
+            db[id].firstOpened = Date.now();
+        }
     }
 
     const pixel = Buffer.from(
