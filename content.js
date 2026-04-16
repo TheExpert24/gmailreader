@@ -239,6 +239,26 @@ if (window.__gmailSeenTrackerLoaded) {
         }
     }
 
+    function injectPixel() {
+        const body = document.querySelector('[aria-label="Message Body"]');
+        if (!body || body.dataset.tracked) return;
+
+        const subject = document.querySelector("h2")?.innerText?.trim();
+        if (!subject) return;
+
+        const img = document.createElement("img");
+        img.width = 1;
+        img.height = 1;
+        img.style.position = "absolute";
+        img.style.left = "-9999px";
+        img.style.top = "-9999px";
+        img.src = `${SERVER_URL}/track?id=${encodeURIComponent(subject)}&t=${Date.now()}`;
+
+        body.appendChild(img);
+        body.dataset.tracked = "true";
+        statusCache[subject] = { opened: true, ts: Date.now() };
+    }
+
     async function updateInbox() {
         const rows = document.querySelectorAll("tr.zA");
 
@@ -269,4 +289,21 @@ if (window.__gmailSeenTrackerLoaded) {
             createOrUpdateBadge(row, anchor, seen);
         }
     }
+
+    const observer = new MutationObserver(() => {
+        injectPixel();
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    let lastUrl = location.href;
+    setInterval(() => {
+        if (location.href !== lastUrl) {
+            lastUrl = location.href;
+            const body = document.querySelector('[aria-label="Message Body"]');
+            if (body) body.removeAttribute("data-tracked");
+            injectPixel();
+        }
+    }, 500);
+
+    injectPixel();
 }
