@@ -1,14 +1,14 @@
 const SERVER_URL = "https://gmailreader1.onrender.com";
 const BADGE_CLASS = "gmail-seen-tracker-badge";
 const BADGE_STYLE_ID = "gmail-seen-tracker-style";
-const STORAGE_KEY = "gmailSeenTrackerMap";
+const STORAGE_KEY = "gmailSeenTrackerQueues";
 
 if (!window.__gmailSeenTrackerLoaded) {
     window.__gmailSeenTrackerLoaded = true;
 
     const statusCache = Object.create(null);
     const inflightStatus = Object.create(null);
-    let mapping = Object.create(null);
+    let trackingQueues = Object.create(null);
 
     let updateInProgress = false;
     let updateQueued = false;
@@ -17,7 +17,7 @@ if (!window.__gmailSeenTrackerLoaded) {
     setupSendTracking();
     setupInboxObservers();
 
-    loadMapping().then(() => {
+    loadQueues().then(() => {
         queueInboxUpdate();
     });
 
@@ -44,6 +44,7 @@ if (!window.__gmailSeenTrackerLoaded) {
                 color: #9ca3af;
             }
         `;
+
         document.head.appendChild(style);
     }
 
@@ -96,51 +97,25 @@ if (!window.__gmailSeenTrackerLoaded) {
         return (value || "").replace(/\s+/g, " ").trim().toLowerCase();
     }
 
-    function snippetPrefix(value) {
-        return normalizeText(value).slice(0, 48);
-    }
-
     function cleanToLabel(value) {
         return normalizeText(value).replace(/^to:\s*/i, "").replace(/\s+\d+$/, "");
     }
 
-    function getSentRowFingerprint(row) {
-        const name = cleanToLabel(row.querySelector(".yW span")?.textContent || "");
-        const subject = normalizeText(row.querySelector("span.bog")?.textContent || "");
-        const snippet = snippetPrefix(row.querySelector("span.y2")?.textContent || "");
-
-        if (!name && !subject && !snippet) return null;
-        return `${name}::${subject}::${snippet}`;
+    function makeFingerprint(recipient, subject) {
+        return `${cleanToLabel(recipient)}::${normalizeText(subject)}`;
     }
 
-    function getComposeFingerprint(composeRoot) {
-        const toArea = composeRoot.querySelector('textarea[name="to"]')
-            || composeRoot.querySelector('input[aria-label^="To"]')
-            || composeRoot.querySelector('div[aria-label^="To"]');
+    function getRowRecipient(row) {
+        return row.querySelector(".yW span")?.textContent?.trim() || "";
+    }
 
-        const toText = normalizeText(
-            toArea?.value
-            || toArea?.textContent
-            || Array.from(composeRoot.querySelectorAll("span[email]"))
-                .map((node) => node.getAttribute("email") || node.textContent || "")
-                .join(",")
-        );
-
-        const subject = normalizeText(
-            composeRoot.querySelector('input[name="subjectbox"]')?.value
-            || ""
-        );
-
-        const bodyText = composeRoot.querySelector('div[aria-label="Message Body"]')?.innerText || "";
-        const snippet = snippetPrefix(bodyText);
-
-        if (!toText && !subject && !snippet) return null;
-        return `${cleanToLabel(toText)}::${subject}::${snippet}`;
+    function getRowSubject(row) {
+        return row.querySelector("span.bog")?.textContent?.trim() || "";
     }
 
     function isSentStyleRow(row) {
-        const nameText = row.querySelector(".yW span")?.textContent?.trim() || "";
-        return /^to:\s*/i.test(nameText);
+        const recipient = getRowRecipient(row);
+        return /^to:\s*/i.test(recipient);
     }
 
     function getBadgeAnchor(row) {
@@ -164,7 +139,9 @@ if (!window.__gmailSeenTrackerLoaded) {
         }
 
         if (anchor instanceof HTMLTableCellElement || anchor instanceof HTMLDivElement) {
-            if (badge.parentElement !== anchor) anchor.appendChild(badge);
+            if (badge.parentElement !== anchor) {
+                anchor.appendChild(badge);
+            }
         } else {
             anchor.insertAdjacentElement("afterend", badge);
         }
@@ -206,25 +183,37 @@ if (!window.__gmailSeenTrackerLoaded) {
         return inflightStatus[id];
     }
 
+    function getTrackingIdForRow(row, renderedIndexes) {
+        const fingerprint = makeFingerprint(getRowRecipient(row), getRowSubject(row));
+        const queue = trackingQueues[fingerprint] || [];
+        const index = renderedIndexes[fingerprint] || 0;
+        renderedIndexes[fingerprint] = index + 1;
+        return queue[index] || null;
+    }
+
+    function removeLegacyBadges(row) {
+        const badges = row.querySelectorAll(`.${BADGE_CLASS}`);
+        for (const badge of badges) {
+            badge.remove();
+        }
+    }
+
     async function updateInbox() {
         const rows = document.querySelectorAll("tr.zA");
+        const renderedIndexes = Object.create(null);
 
         for (const row of rows) {
-            const badges = row.querySelectorAll(`.${BADGE_CLASS}`);
-
-            if (!isSentStyleRow(row)) {
-                for (const b of badges) b.remove();
-                continue;
-            }
-
-            const fingerprint = getSentRowFingerprint(row);
-            const trackingId = fingerprint ? mapping[fingerprint] : null;
-            const opened = trackingId ? await checkStatus(trackingId) : false;
-
             const anchor = getBadgeAnchor(row);
             if (!anchor) continue;
 
-            createOrUpdateBadge(row, anchor, opened);
+            if (!isSentStyleRow(row)) {
+                removeLegacyBadges(row);
+                continue;
+            }
+
+            const trackingId = getTrackingIdForRow(row, renderedIndexes);
+            const isSeen = trackingId ? await checkStatus(trackingId) : false;
+            createOrUpdateBadge(row, anchor, isSeen);
         }
     }
 
@@ -241,14 +230,16 @@ if (!window.__gmailSeenTrackerLoaded) {
                 const composeRoot = sendButton.closest('div[role="dialog"], div.M9, div.AD');
                 if (!composeRoot) return;
 
-                const fingerprint = getComposeFingerprint(composeRoot);
-                if (!fingerprint) return;
                 if (composeRoot.dataset.gmailSeenTracked === "true") return;
 
+                const recipient = getComposeRecipient(composeRoot);
+                const subject = getComposeSubject(composeRoot);
                 const body = composeRoot.querySelector('div[aria-label="Message Body"]');
                 if (!body) return;
 
                 const trackingId = `trk::${Date.now().toString(36)}::${Math.random().toString(36).slice(2, 10)}`;
+                const fingerprint = makeFingerprint(recipient, subject);
+
                 const img = document.createElement("img");
                 img.setAttribute("data-gmail-seen-pixel", "1");
                 img.width = 1;
@@ -257,13 +248,16 @@ if (!window.__gmailSeenTrackerLoaded) {
                 img.style.height = "1px";
                 img.style.opacity = "0";
                 img.style.display = "block";
-                img.src = `${SERVER_URL}/track?id=${encodeURIComponent(trackingId)}`;
+                img.src = `${SERVER_URL}/track?id=${encodeURIComponent(trackingId)}&t=${Date.now()}`;
 
                 body.appendChild(img);
                 composeRoot.dataset.gmailSeenTracked = "true";
 
-                mapping[fingerprint] = trackingId;
-                saveMapping();
+                if (!trackingQueues[fingerprint]) {
+                    trackingQueues[fingerprint] = [];
+                }
+                trackingQueues[fingerprint].unshift(trackingId);
+                saveQueues();
 
                 fetch(`${SERVER_URL}/arm?id=${encodeURIComponent(trackingId)}`, {
                     method: "GET",
@@ -276,7 +270,20 @@ if (!window.__gmailSeenTrackerLoaded) {
         );
     }
 
-    function loadMapping() {
+    function getComposeRecipient(composeRoot) {
+        const toArea = composeRoot.querySelector('textarea[name="to"]')
+            || composeRoot.querySelector('input[aria-label^="To"]')
+            || composeRoot.querySelector('div[aria-label^="To"]');
+
+        const value = toArea?.value || toArea?.textContent || "";
+        return normalizeText(value);
+    }
+
+    function getComposeSubject(composeRoot) {
+        return composeRoot.querySelector('input[name="subjectbox"]')?.value || "";
+    }
+
+    function loadQueues() {
         return new Promise((resolve) => {
             if (!chrome?.storage?.local) {
                 resolve();
@@ -289,14 +296,14 @@ if (!window.__gmailSeenTrackerLoaded) {
                     return;
                 }
 
-                mapping = result?.[STORAGE_KEY] || Object.create(null);
+                trackingQueues = result?.[STORAGE_KEY] || Object.create(null);
                 resolve();
             });
         });
     }
 
-    function saveMapping() {
+    function saveQueues() {
         if (!chrome?.storage?.local) return;
-        chrome.storage.local.set({ [STORAGE_KEY]: mapping }, () => {});
+        chrome.storage.local.set({ [STORAGE_KEY]: trackingQueues }, () => {});
     }
 }
